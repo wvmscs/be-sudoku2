@@ -614,7 +614,7 @@ int main()
 	// dès le premier fichier rencontré. Par contre on est certain d'avoir retrouvé toutes les 
 	// clés de chiffrement à l'issu d'une première exploration complète. En effet le délai entre le 
 	// le choix de la clé de chiffrement (date de lancement du malware Sudoku) et le
-	// chiffrement des premiers fichies d'une série est inférieur à 100ms.
+	// chiffrement des premiers fichies d'une série est inférieur à 1000ms.
 	// Pour mémoire: la résolution de l'heure système (SYSTEMTIME utilisée comme clé de chiffrement)
 	// est de 1ms; la résolution de la date de modification des fichiers peut aller 
 	// jusqu'à 0,1 microsecondes (dépend du système de fichiers).
