@@ -75,6 +75,12 @@ typedef struct tag_savestates {
 	BOOL bCountRep;
 	HANDLE hlogfile;
 	std::ostream *log;
+	char * pbasePath;
+	const char *listOfDirectoryToSkip[10] = {
+		"AppData\\Local",
+		NULL
+	};
+
 } savestates, *psavestates;
 
 const int MYMAXLEN = 1024;
@@ -93,14 +99,75 @@ const char *LPMAGIC[] = {
 			"{\rtf1",									// rtf
 			NULL };
 
+// méthode de vérification du critère d'arrêt moins laxiste!
+BOOL isKnownMagic(const char *pPath, byte *lpbuff, int len) {
+	static const char *magic_docx[] = { "PK\x03\x04", "PK\x05\x06", "PK\x07\x08", NULL };
+	static const char *magic_doc[] =  { "\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", NULL };
+	static const char *magic_pdf[] = { "%PDF", NULL };
+	static const char *magic_gif[] = { "GIF8", NULL };
+	static const char *magic_png[] = { "\x89PNG", "RIFF", NULL };
+	static const char *magic_jpg[] = { "\xff\xd8\xff", NULL };
+	static const char *magic_rtf[] = { "{\rtf1", NULL };
+	BOOL retval = FALSE;
+	const char *extension = strrchr(pPath, '.');
+	const char ** evid = NULL;
+	if (extension) {
+		extension += 1;
+		if (_stricmp(extension, "docx") == 0 || _stricmp(extension, "pptx") == 0 || _stricmp(extension, "xlsx") == 0) {
+			evid = magic_docx;
+		} 
+		if (!evid) if (_stricmp(extension, "doc") == 0 || _stricmp(extension, "ppt") == 0 || _stricmp(extension, "xls") == 0) {
+			evid = magic_doc;
+		}
+		if (!evid) if (_stricmp(extension, "pdf") == 0) {
+			evid = magic_pdf;
+		}
+		if (!evid) if (_stricmp(extension, "gif") == 0) {
+			evid = magic_gif;
+		}
+		if (!evid) if (_stricmp(extension, "png") == 0) {
+			evid = magic_png;
+		}
+		if (!evid) if (_stricmp(extension, "jpg") == 0 || _stricmp(extension, "jepg") == 0) {
+			evid = magic_jpg;
+		}
+		if (!evid) if (_stricmp(extension, "rtf") == 0) {
+			evid = magic_rtf;
+		}
+		if (evid) {
+			for (const char **p = evid; *p != NULL; p++) {
+				int max = strlen(*p);
+				if (len >= max) {
+					if (memcmp(lpbuff, *p, max) == 0) retval = TRUE;
+				}
+			}
+		}
+		if (!retval) if (_stricmp(extension, "htm") == 0 || _stricmp(extension, "html") == 0) {
+			// tenter une reconaissance de caractères ascii ou utf8 (une trentaire ...
+			BOOL b = TRUE;
+			int mlen = 30; if (len < 30) mlen = len;
+			if (mlen) {
+				for (int i = 0; i < mlen && b; i++) {
+					b = b && (isascii(*(lpbuff + i)) || iswascii(*(lpbuff + i)));
+				}
+				retval = b;
+			}
+		}
+
+	}
+	return retval;
+}
+
+
 const unsigned char *lpIV = (unsigned char *)"@GPCODE";
 const char *lpMagicCryptor = "GPGcryptor";
 const char *lpIOCmd5_exe = "\x52\xfb\x8b\xa7\x0f\xbc\x1b\xa8\xf9\xd6\x65\xf2\x19\x29\xbb\x50";
 const char *lpIOCmd5_readme = "\x94\x89\x9f\x98\x3b\x85\x47\xca\xbb\xcf\x3b\xe4\x9d\xd9\xd5\xd5";
 const char *lpRegKey = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 
+/* DANGEREUX! _ voir l'implémentation alternative ci-dessus moins laxiste
 // indique si le bloc mémoire peut être assimilé à un décodage réussi
-inline BOOL isKnownMagic(const byte *lp, const unsigned len) {
+inline BOOL isKnownMagic_old(const byte *lp, const unsigned len) {
 	const char **l = LPMAGIC;
 	BOOL retval = FALSE;
 	while (*l && !retval) {
@@ -111,21 +178,25 @@ inline BOOL isKnownMagic(const byte *lp, const unsigned len) {
 	if (!retval) {
 		// tenter une reconaissance de caractères ascii ou utf8
 		BOOL b = TRUE;
-		for (int i = 0; i < 10 && b; i++) {
+		int mlen = 10; if (len < 10) mlen=len;
+		for (int i = 0; i < mlen && b; i++) {
 			b = b && (isascii(*(lp + i)) || iswascii(*(lp + i)));
 		}
 		retval = b;
 	}
 	return retval;
 }
+*/
 
-
-unsigned int revoveFileByMd5(const LPCSTR pcurrentDirectory, const LPCSTR pextend, const LPCSTR pmd5, psavestates lpcontext, BOOL report_supress) {
+unsigned int revoveFileByMd5(const LPCSTR pcurrentDirectory, const LPCSTR pextend, const LPCSTR pmd5, psavestates lpcontext, BOOL report_supress, BOOL useextend=TRUE) {
 	WIN32_FIND_DATAA wfd_context;
 	CHAR curSearch[MYMAXLEN];
 	unsigned int count = 0;
 
-	snprintf(curSearch, MYMAXLEN - 1, "%s\\%s", pcurrentDirectory, pextend);
+	if (useextend)
+		snprintf(curSearch, MYMAXLEN - 1, "%s\\%s", pcurrentDirectory, pextend);
+	else
+		snprintf(curSearch, MYMAXLEN - 1, "%s", pcurrentDirectory);
 
 	HANDLE hfind = FindFirstFileA(curSearch, &wfd_context);
 	if (hfind != INVALID_HANDLE_VALUE) {
@@ -135,7 +206,10 @@ unsigned int revoveFileByMd5(const LPCSTR pcurrentDirectory, const LPCSTR pexten
 			md5_state_t md5st;
 
 			if (!(wfd_context.dwFileAttributes & 0x10)) {
-				snprintf(filePath, FILEPATH_LEN, "%s\\%s", pcurrentDirectory, &wfd_context.cFileName);
+				if (useextend)
+					snprintf(filePath, FILEPATH_LEN, "%s\\%s", pcurrentDirectory, &wfd_context.cFileName);
+				else
+					snprintf(filePath, FILEPATH_LEN, "%s", pcurrentDirectory);
 				// cout << " ... Etude de la suppression de " << filePath;
 				md5_init(&md5st);
 				FILE *fd;
@@ -179,6 +253,20 @@ unsigned int removeReadMeFile(const LPCSTR currentDirectory, psavestates lpconte
 unsigned int removeSudokuFile(const LPCSTR currentDirectory, psavestates lpcontext) {
 	return revoveFileByMd5(currentDirectory, "*.exe", lpIOCmd5_exe, lpcontext, TRUE);
 }
+unsigned int removeFileIfIOC(const LPCSTR currentDirectory, psavestates lpcontext) {
+	return revoveFileByMd5(currentDirectory, "*.exe", lpIOCmd5_exe, lpcontext, TRUE, FALSE);
+}
+
+
+BOOL isDirectoryToSkip(LPCSTR psearchDir, psavestates lpcontext) {
+	BOOL retval = FALSE;
+	int l = strlen(lpcontext->pbasePath) + 1;
+	for (const char **p = lpcontext->listOfDirectoryToSkip; *p; p++) {
+		if (strstr(psearchDir, *p) == (psearchDir + l))
+			retval = TRUE;
+	}
+	return retval;
+}
 
 void parcoursRepertoires(LPCSTR currentDirectory, void (*fn_callback)(void *, LPCSTR,  LPWIN32_FIND_DATAA), 
 	psavestates lpcontext) {
@@ -213,7 +301,13 @@ void parcoursRepertoires(LPCSTR currentDirectory, void (*fn_callback)(void *, LP
 					CHAR newSearchDir[MYMAXLEN];
 					snprintf(newSearchDir, MYMAXLEN - 1, "%s\\%s", currentDirectory,
 						wfd_context.cFileName);
-					parcoursRepertoires(newSearchDir, fn_callback, lpcontext);
+					if (!isDirectoryToSkip(newSearchDir, lpcontext))
+						parcoursRepertoires(newSearchDir, fn_callback, lpcontext);
+					else {
+						// on n'effectura pas de recovery des sous répertoires à partir de ce point
+						*lpcontext->log << "Skipped: le répertoire " << newSearchDir << "ne sera pas analysé\n";
+						cout << "Skipped: le répertoire " << newSearchDir << "ne sera pas analysé\n";
+					}
 				}
 			}
 		} while (FindNextFileA(hfind, &wfd_context));
@@ -288,20 +382,18 @@ void fn_listdir(void *context, LPCSTR currentDir, LPWIN32_FIND_DATAA lpFileDesc)
 	
 }
 
-
-
+#define MYLLEN 256
+char __printstring[MYLLEN];
+char * stringSystemTime(LPSYSTEMTIME lp) {
+	snprintf(__printstring, MYLLEN,
+		" %02d/%02d/%d-%02d:%02d:%0d:%d",
+		(lp)->wDay, (lp)->wMonth, (lp)->wYear,
+		(lp)->wHour, (lp)->wMinute, (lp)->wSecond, (lp)->wMilliseconds);
+	return __printstring;
+}
 
 void printSystemTime(LPSYSTEMTIME lpst) {
-	const int MYLLEN = 256;
-	char printstring[MYLLEN];
-	LPSYSTEMTIME *lp = &lpst;
-
-	snprintf(printstring, MYLLEN,
-		" %02d/%02d/%d--%02d:%02d:%0d:%d",
-		(*lp)->wDay, (*lp)->wMonth, (*lp)->wYear,
-		(*lp)->wHour, (*lp)->wMinute, (*lp)->wSecond, (*lp)->wMilliseconds);
-	cout << printstring;
-
+	cout << stringSystemTime(lpst);
 }
 
 class BLOWFISH {
@@ -397,7 +489,7 @@ void KEYARRAYA::appendKey(ULARGE_INTEGER *lpKey) {
 }
 
 
-BOOL tryDecypherFile(const char *lpFilePath, byte *lpBuffer, DWORD fileLen, DWORD trueSize, ULARGE_INTEGER *ulargeptr) {
+BOOL tryDecypherFile(const char *lpFilePath, byte *lpBuffer, DWORD fileLen, DWORD trueSize, ULARGE_INTEGER *ulargeptr, psavestates lpKeyCache) {
 	FILETIME ft_var;
 	//tester une clé
 	SYSTEMTIME thisKey;
@@ -414,11 +506,13 @@ BOOL tryDecypherFile(const char *lpFilePath, byte *lpBuffer, DWORD fileLen, DWOR
 	bf.Decrypt_CBC(lpBuffer, fileLen, &decryptlen);
 
 	// vérification du décodage 
-	if (isKnownMagic(lpBuffer, decryptlen) == TRUE) {
+	if (isKnownMagic(lpFilePath, lpBuffer, decryptlen) == TRUE) {
 
-		cout << " TROUVE\nkey=";
+		cout << " TROUVE key=";
 		printSystemTime(&thisKey);
 		cout  << "\n";
+
+		*lpKeyCache->log << " TROUVE key=" << stringSystemTime(&thisKey) << "\n";
 
 		HANDLE hFile = CreateFileA(lpFilePath, GENERIC_WRITE, 0, NULL,
 			OPEN_EXISTING, 0, NULL);
@@ -493,10 +587,10 @@ BOOL uncipherFile(const char *lpFilePath, psavestates lpKeyCache) {
 					ULARGE_INTEGER *ulargeptr = lpKeyCache->Ka.getKey();
 					while (ulargeptr && !fileOK) {
 						cout << "*";
-						*lpKeyCache->log << "*";
+						//*lpKeyCache->log << "*";
 						memcpy(lpBuffer, (byte *)fileData + magiclen + 4, bytesRead - (magiclen + 4));
 
-						fileOK = tryDecypherFile(lpFilePath, lpBuffer, bytesRead - (magiclen + 4), trueSize, ulargeptr);
+						fileOK = tryDecypherFile(lpFilePath, lpBuffer, bytesRead - (magiclen + 4), trueSize, ulargeptr, lpKeyCache);
 					
 						ulargeptr = lpKeyCache->Ka.getNextKey();
 					}
@@ -512,10 +606,10 @@ BOOL uncipherFile(const char *lpFilePath, psavestates lpKeyCache) {
 						while (!fileOK && ularge_ftWrite.QuadPart >= ularge_ftWrite_min.QuadPart) {
 							
 							cout << ".";
-							*lpKeyCache->log << ".";
+							//*lpKeyCache->log << ".";
 
 							memcpy(lpBuffer, (byte *)fileData + magiclen + 4, bytesRead - (magiclen + 4));
-							fileOK = tryDecypherFile(lpFilePath, lpBuffer, bytesRead - (magiclen + 4), trueSize, &ularge_ftWrite);
+							fileOK = tryDecypherFile(lpFilePath, lpBuffer, bytesRead - (magiclen + 4), trueSize, &ularge_ftWrite, lpKeyCache);
 
 							if(fileOK) lpKeyCache->Ka.appendKey(&ularge_ftWrite); // enregistrer la clé trouvée
 
@@ -523,8 +617,8 @@ BOOL uncipherFile(const char *lpFilePath, psavestates lpKeyCache) {
 						}
 
 					}
-					if (!fileOK) { cout << " No key found!"; *lpKeyCache->log << " No key found!"; }
-					cout << "\n"; *lpKeyCache->log << "\n";
+					if (!fileOK) { cout << " No key found!"; *lpKeyCache->log << " No key found!\n"; }
+					cout << "\n"; //*lpKeyCache->log << "\n";
 					if (fileOK) {
 						retval = TRUE;
 						lpKeyCache->nbFichiersDechiffres++;
@@ -576,6 +670,7 @@ int main()
 	}
 
     std::cout << "HOMEPATH: " << homepath <<"\n";
+	svsts.pbasePath = homepath;
 
 	/* *** TODO: automatiser la supression des clés et binaires servant à la persistance
 	 *     du malware
@@ -589,7 +684,7 @@ int main()
 	*svsts.log << "ANTISUDOKU: Restauration des fichiers chiffrés par le malware Sudoku.exe\n";
 	*svsts.log << " (identifié par Windows Defender comme Trojan:Win32/Sprisky.U!cl)\n\n";
 	*svsts.log << "Actions exécutées:\n";
-	*svsts.log << "    - suppression de la valeur _SuDOkU_ de la clé de registre HKEY_CURRENT_USER" << lpRegKey << "\n";
+	*svsts.log << "    - suppression de la valeur _SuDOkU_ de la clé de registre HKEY_CURRENT_USER\\" << lpRegKey << "\n";
 	*svsts.log << "    - suppression de toutes les copies du programme Sudoku.exe et de ses clones\n";
 	*svsts.log << "    - suppression des fichiers texte de demande de rançon\n";
 	*svsts.log << "    - déchiffrement des fichiers personnels\n\n";
@@ -624,17 +719,40 @@ int main()
 
 	// supression de la clé de registre
 	HKEY tpKey =  NULL;
-	LSTATUS retval = RegOpenKeyExA(HKEY_CURRENT_USER, lpRegKey, NULL, KEY_SET_VALUE, &tpKey);
+	LPSTR lpSudokuPath = (LPSTR)malloc(MYMAXLEN);
+	DWORD lenSudokuPath = MYMAXLEN;
+	LSTATUS retval = RegOpenKeyExA(HKEY_CURRENT_USER, lpRegKey, NULL, KEY_READ|KEY_SET_VALUE, &tpKey);
 	if (retval == ERROR_SUCCESS) {
+		retval = RegQueryValueExA(tpKey, "_SuDOkU_", NULL, NULL, (LPBYTE)lpSudokuPath, &lenSudokuPath);
+		if (retval == ERROR_SUCCESS) {
+			*(lpSudokuPath + lenSudokuPath) = '\x00';
+			svsts.nbFichierExeSupprime += removeFileIfIOC(lpSudokuPath, &svsts); // supression du fichier (!si IOC ... parano!)			
+		}
 		retval = RegDeleteValueA(tpKey, "_SuDOkU_"); // , /*KEY_WOW64_32KEY*/  KEY_WOW64_64KEY, NULL);
 		RegCloseKey(tpKey);
 		if (retval != ERROR_SUCCESS && retval != ERROR_FILE_NOT_FOUND) {
 			*svsts.log << "REG: Echec de supression de la clé _SuDOkU_\n";
-		}
+		} else if(retval == ERROR_SUCCESS) *svsts.log << "REG: clé _SuDOkU_ supprimée\n";
+		else  *svsts.log << "REG: la clé _SuDOkU_ était déjà abscente\n";
 	}
 	else {
 		*svsts.log << "REG: Impossible d'ouvrir la clé " << lpRegKey << "\n";
 	}
+
+	//Vérification du répertoire startup et purge des clones de SUDOKU qui pourraient s'y trouver
+	const char *lpstartupkey = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders";
+	LPSTR lpstartupPath = (LPSTR)malloc(MYMAXLEN);
+	DWORD lenStartupPath = MYMAXLEN;
+	retval = RegOpenKeyExA(HKEY_CURRENT_USER, lpstartupkey, NULL, KEY_READ, &tpKey);
+	if (retval == ERROR_SUCCESS) {
+		retval = RegQueryValueExA(tpKey, "Startup", NULL, NULL, (LPBYTE)lpstartupPath, &lenStartupPath);
+		if (retval == ERROR_SUCCESS) {
+			*(lpstartupPath + lenStartupPath) = '\x00';
+			svsts.nbFichierExeSupprime += removeSudokuFile(lpstartupPath, &svsts); //suppression des clones	
+		}
+		RegCloseKey(tpKey);
+	}
+	free(lpstartupPath); lpstartupPath=NULL;
 
 	svsts.bCountRep = TRUE;
 	parcoursRepertoires(homepath, fn_listdir, &svsts); //Tour 1
@@ -655,7 +773,7 @@ int main()
 		*svsts.log << statsBuffer;
 
 		snprintf(statsBuffer, FILEBUFFER_LEN,
-			"Nombre de fichiers README.txt supprimés\t\t\t\t%u\nNombre de copies du programme SUDOKU.exe supprimées\t\t%u\nNombre de fichiers qui n'ont pû être controllés (Erreurs)\t%u\n",
+			"Nombre de fichiers README.txt supprimés\t\t\t\t%u\nNombre de copies du programme SUDOKU.exe supprimées\t\t%u\nNombre de fichiers qui n'ont pût être côntrolés (Erreurs)\t%u\n",
 			svsts.nbFichierReadmeSupprime ,
 			svsts.nbFichierExeSupprime ,
 			svsts.nbEchecLectureFichier
